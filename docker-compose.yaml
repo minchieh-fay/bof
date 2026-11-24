@@ -1,0 +1,16 @@
+services:
+  bof:
+    image: alpine:3.22
+    platform: linux/amd64
+    working_dir: /app
+    command: ["/app/bof-linux-amd64", "-config", "/app/config.yaml"]
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    volumes:
+      - ./bof-linux-amd64:/app/bof-linux-amd64:ro
+      - ./config.yaml:/app/config.yaml:ro
+      - type: bind
+        source: /root/key
+        target: /root/key
+        read_only: true
