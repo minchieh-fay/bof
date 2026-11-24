@@ -543,12 +543,17 @@ func help_buyQuantity(cfg config, price string, times int) decimal.Decimal {
 	return decimal.NewFromFloat(cfg.Amount).Mul(factor).DivRound(help_decimal(price), 24)
 }
 
-// help_orderMarket 读取最近的实时行情以及该市场当前的交易规则。
-func (b *bot) help_orderMarket(symbol string) (futures.Symbol, string, bool) {
+// help_orderMarket 只为仍符合触发价的实时行情返回交易规则和报价。
+func (b *bot) help_orderMarket(symbol string, threshold float64) (futures.Symbol, string, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	m := b.markets[symbol]
 	if m == nil || !m.ranked || m.loading || m.price == "" || time.Since(time.UnixMilli(m.priceAt)) > 10*time.Second {
+		return futures.Symbol{}, "", false
+	}
+	// 将实时成交价与本次买入信号的触发价比较。
+	price := help_positive(m.price)
+	if price <= 0 || price >= threshold {
 		return futures.Symbol{}, "", false
 	}
 	return m.rules, m.price, true
@@ -591,11 +596,16 @@ func help_orderTerms(rule futures.Symbol, latest string, remaining decimal.Decim
 }
 
 // help_postBuy 仅在 GTX 价格冲突时逐档降价，单轮最多提交三次。
-func (b *bot) help_postBuy(ctx context.Context, rule futures.Symbol, latest string, remaining decimal.Decimal) (
+func (b *bot) help_postBuy(ctx context.Context, symbol string, threshold float64, remaining decimal.Decimal) (
 	id string, accepted, uncertain, retry bool,
 ) {
 	for attempt := int64(0); attempt < 3 && ctx.Err() == nil; attempt++ {
 		// step.1 根据合约交易规则准备该档位的 GTX 买入委托。
+		// 每一档都重新读取行情，价格回到触发价时结束本次买入。
+		rule, latest, ok := b.help_orderMarket(symbol, threshold)
+		if !ok {
+			return "", false, false, false
+		}
 		// 计算可提交的价格和剩余数量。
 		price, qty, ok := help_orderTerms(rule, latest, remaining, attempt)
 		if !ok {

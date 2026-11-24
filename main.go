@@ -202,12 +202,7 @@ func (b *bot) onKline(ctx context.Context, event *futures.WsKlineEvent) {
 		time.Since(time.UnixMilli(event.Time)) > 10*time.Second {
 		return
 	}
-	times := b.times
-	b.times++
-	if times == 0 {
-		b.decayAt = time.Now()
-	}
 	b.busy[event.Symbol] = true
 	b.jobs.Add(1)
-	go b.buy(b.ctx, event.Symbol, event.Kline.Close, times)
+	go b.buy(b.ctx, event.Symbol, event.Kline.Close, b.times, threshold)
 }
