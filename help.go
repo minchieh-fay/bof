@@ -135,7 +135,7 @@ func (b *bot) help_prepareAccount(ctx context.Context) error {
 	return nil
 }
 
-// help_marketRules 取得与同名可交易 USDT 现货匹配的合约规则。
+// help_marketRules 读取有同名可交易 USDT 现货的合约规则。
 func (b *bot) help_marketRules(ctx context.Context) (map[string]futures.Symbol, error) {
 	// step.1 读取现货和合约市场清单。
 	spot, err := b.spot.NewExchangeInfoService().Do(ctx)
@@ -150,15 +150,17 @@ func (b *bot) help_marketRules(ctx context.Context) (map[string]futures.Symbol, 
 	if err != nil {
 		return nil, fmt.Errorf("读取合约市场: %w", err)
 	}
-	// step.2 筛选具有同名 USDT 现货、支持 GTX 的可交易合约。
+	// step.2 确定与可交易 USDT 现货匹配的合约订阅范围。
 	listed := make(map[string]bool)
 	for _, entry := range spot.Symbols {
-		listed[entry.Symbol] = entry.Status == "TRADING" && entry.QuoteAsset == "USDT" && entry.IsSpotTradingAllowed
+		if entry.Status == "TRADING" && entry.QuoteAsset == "USDT" && entry.IsSpotTradingAllowed {
+			listed[entry.Symbol] = true
+		}
 	}
 	rules := make(map[string]futures.Symbol)
 	for _, rule := range info.Symbols {
-		if listed[rule.Symbol] && strings.HasSuffix(rule.Symbol, "USDT") && rule.QuoteAsset == "USDT" &&
-			rule.Status == "TRADING" && slices.Contains(rule.TimeInForce, futures.TimeInForceTypeGTX) {
+		if listed[rule.Symbol] && strings.HasSuffix(rule.Symbol, "USDT") &&
+			rule.QuoteAsset == "USDT" && rule.Status == "TRADING" {
 			rules[rule.Symbol] = rule
 		}
 	}
@@ -266,9 +268,12 @@ func (b *bot) help_refreshData(ctx context.Context, initial bool) {
 	for name := range b.markets {
 		names = append(names, name)
 	}
-	sort.Strings(names)
 	b.mu.Unlock()
-	for _, name := range names {
+	sort.Strings(names)
+	if initial {
+		log.Printf("正在同步历史 K 线，周期 %s，共 %d 个交易对", b.cfg.Interval, len(names))
+	}
+	for i, name := range names {
 		if ctx.Err() != nil {
 			return
 		}
@@ -283,6 +288,10 @@ func (b *bot) help_refreshData(ctx context.Context, initial bool) {
 			// 用历史收盘价预热合约布林窗口。
 			b.help_pacedHistory(ctx, name, m)
 		}
+		if initial && ctx.Err() == nil {
+			// 汇报历史 K 线阶段已处理的交易对数量。
+			help_logStartupProgress("历史 K 线同步", i+1, len(names))
+		}
 	}
 	// step.2 首次逐个加载成交额，之后按名称轮转每小时刷新一项。
 	if !initial && len(names) > 0 {
@@ -292,7 +301,10 @@ func (b *bot) help_refreshData(ctx context.Context, initial bool) {
 		}
 		names = []string{names[i%len(names)]}
 	}
-	for _, name := range names {
+	if initial {
+		log.Printf("正在同步现货成交额，共 %d 个交易对", len(names))
+	}
+	for i, name := range names {
 		// 在逐交易对查询现货成交额时保留调用间隔。
 		if !help_wait(ctx, 50*time.Millisecond) {
 			return
@@ -300,13 +312,20 @@ func (b *bot) help_refreshData(ctx context.Context, initial bool) {
 		b.volumeCursor = name
 		// 读取该现货近七日成交额。
 		v, err := b.help_spotVolume(ctx, name)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			log.Printf("%s 现货成交额获取失败: %v", name, err)
-			continue
+		} else {
+			b.mu.Lock()
+			b.markets[name].volume = v
+			b.mu.Unlock()
 		}
-		b.mu.Lock()
-		b.markets[name].volume = v
-		b.mu.Unlock()
+		if initial {
+			// 汇报现货成交额阶段已处理的交易对数量。
+			help_logStartupProgress("现货成交额同步", i+1, len(names))
+		}
 	}
 	// step.3 按更新后的成交额重算允许买入的集合。
 	b.mu.Lock()
@@ -315,12 +334,21 @@ func (b *bot) help_refreshData(ctx context.Context, initial bool) {
 	b.mu.Unlock()
 }
 
+// help_logStartupProgress 每处理 20 个交易对以及处理最后一个时记录初始化进度。
+func help_logStartupProgress(stage string, processed, total int) {
+	if processed%20 == 0 || processed == total {
+		log.Printf("%s进度 已处理 %d/%d", stage, processed, total)
+	}
+}
+
 // help_rank 按成交额从高到低标记前指定比例的交易对。
 func (b *bot) help_rank() {
 	names := make([]string, 0, len(b.markets))
 	for name, m := range b.markets {
 		m.ranked = false
-		names = append(names, name)
+		if slices.Contains(m.rules.TimeInForce, futures.TimeInForceTypeGTX) {
+			names = append(names, name)
+		}
 	}
 	sort.Slice(names, func(i, j int) bool {
 		left, right := b.markets[names[i]].volume, b.markets[names[j]].volume

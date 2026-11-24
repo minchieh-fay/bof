@@ -58,6 +58,7 @@ func main() {
 	// step.1 加载运行配置和实盘凭据。
 	path := flag.String("config", "config.yaml", "配置文件路径")
 	flag.Parse()
+	log.Printf("BOF 正在启动，读取配置 %s", *path)
 	// 读取并校验买入策略配置。
 	cfg, err := help_loadConfig(*path)
 	if err != nil {
@@ -86,11 +87,13 @@ func main() {
 // run 初始化市场和账户，并定时维护订阅、现货排行及买入计数。
 func (b *bot) run(ctx context.Context) error {
 	// step.1 校验账户并恢复上次进程遗留的策略挂单。
+	log.Print("正在校验币安合约账户并检查遗留挂单")
 	// 对齐签名时间、验证持仓模式并撤销遗留挂单。
 	if err := b.help_prepareAccount(ctx); err != nil {
 		return err
 	}
 	// step.2 初始化市场集合、历史行情和成交额排行，再启动分组订阅。
+	log.Print("正在读取币安现货和合约交易对清单")
 	if err := b.refresh(ctx, true); err != nil {
 		return err
 	}
@@ -128,8 +131,8 @@ func (b *bot) run(ctx context.Context) error {
 
 // refresh 同步可交易市场并维护现货成交额排行。
 func (b *bot) refresh(ctx context.Context, initial bool) error {
-	// step.1 获取同时处于交易状态的合约和对应现货。
-	// 合并合约与现货交易所清单。
+	// step.1 获取有同名可交易现货的 USDT 合约。
+	// 匹配合约与现货市场清单，确定行情订阅范围。
 	rules, err := b.help_marketRules(ctx)
 	if err != nil {
 		return err
@@ -147,6 +150,8 @@ func (b *bot) refresh(ctx context.Context, initial bool) error {
 		}
 		b.markets[symbol].rules = rule
 	}
+	// 市场状态变动后立即更新下单资格，避免沿用旧排行。
+	b.help_rank()
 	b.mu.Unlock()
 	// step.3 补齐缺失的历史 K 线并更新成交额。
 	// 首次加载全量现货成交额，之后每小时更新一项。
